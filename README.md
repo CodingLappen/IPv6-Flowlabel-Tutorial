@@ -5,90 +5,206 @@ From my experience that is not a straight forward task, you have to do some rese
 
 
 ## Getting started
+In this section there are mutliple steps needed to setup the flowlabel sending.
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
-
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
-
-## Add your files
-
-- [ ] [Create](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#create-a-file) or [upload](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#upload-a-file) files
-- [ ] [Add files using the command line](https://docs.gitlab.com/ee/gitlab-basics/add-file.html#add-a-file-using-the-command-line) or push an existing Git repository with the following command:
-
+###  Libraries to include and variables to set.
+The variables need to be 32 Bit integer number,
+because the syscall does not accept other sizes.
+It shouldn't matter if a unsigned or signed integer,
+because the numbers 0 and 1 are the same in either 
+number representation.
+```c
+#ifndef IPV6_FLOWINFO_SEND
+#define IPV6_FLOWINFO_SEND 33 
+#endif
+#ifndef IPV6_FLOWINFO
+#define IPV6_FLOWINFO 11
+#endif
+/* Glibc weirdness */
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <linux/in6.h>
+#include <stdio.h>
+#include <errno.h>
+#include <types.h>
+uint32_t on=1;
+uint32_t off=0;
 ```
-cd existing_repo
-git remote add origin https://git.informatik.uni-rostock.de/tr299/how-to-ipv6-flowlabel.git
-git branch -M main
-git push -uf origin main
+###  Enabling sending the flowlabel per socket. 
+Following syscalls enable the sending and receiving of 
+```c
+if(setsockopt(sockfd, IPPROTO_IPV6, IPV6_FLOWINFO_SEND,
+                    (const char*)&on, sizeof(on)) < 0) {
+        perror("FLOWINFO_SEND failed.");
+}
+if(setsockopt(sockfd, IPPROTO_IPV6, IPV6_FLOWINFO,
+                    (const char*)&on, sizeof(on)) < 0) {
+	perror("FLOWINFO failed.");
+}
+if (setsockopt(sockfd, IPPROTO_IPV6, IPV6_AUTOFLOWLABEL,
+        &off, sizeof(off))){
+	perror("AUTFLOWLABEL failed.");
+    }
+```
+## Reserving a flowlabel
+To reserve flowlabels following function was defined as kind of macro:
+```c
+int flowlabel_get(int fd, uint32_t label, uint8_t share, uint16_t flags, struct in6_addr * addr)
+{
+	struct in6_flowlabel_req req = {
+		.flr_action = IPV6_FL_A_GET,
+		.flr_label = htonl(label),
+		.flr_flags = flags,
+		.flr_share = share,
+	};
+	memset(&req.flr_dst.s6_addr,0,sizeof(req.flr_dst.s6_addr));
+    	if (addr !=NULL) {
+        	memcpy(&req.flr_dst,addr ,sizeof(struct in6_addr));
+    	}
+	/* do not pass IPV6_ADDR_ANY or IPV6_ADDR_MAPPED */
+	return setsockopt(fd, SOL_IPV6, 32, &req, sizeof(req));
+}
+```
+The first argument socket descriptor, the second is the flowlabel and the fifth is the ipv6 address.
+The third indicates that the flowlabel is either exclusive, exclusive to the user or that anyone can use it.
+The fourth argument are flags, that either indicate, if a flowlabel should be allocated (created) or not and if an shared label should be acquired exclusively.
+
+Following use cases are described.
+```c
+/* fd is the socket file descriptor */
+/* addr is the ipv6 address */
+uint32_t flowlabel=7432; // Can be 20 bits long
+if (((1<<32 | i<<32-1)-(i<<21)-1) &flowlabel ){
+	perror("flowlabel to large");
+	return -1;
+}
+int res;
+/* Create the a new label, so anyone has access */
+res= flowlabel_get(fd,flowlabel,IPV6_FL_S_ANY,IPV6_FL_F_CREATE,addr);
+/* Get the label, if the flowlabel has been created, it doesn't matter if you call it with the flag.*/
+res= flowlabel_get(fd,flowlabel,IPV6_FL_S_ANY,0,addr);
+/* Get it exclusively */
+res= flowlabel_get(fd,flowlabel,IPV6_FL_S_ANY,IPV6_FL_F_EXCL,addr);
+/* Create an exclusive label  */
+res= flowlabel_get(fd,flowlabel,IPV6_FL_S_EXCL,IPV6_FL_F_CREATE,addr);
+/* Create an user exclusive label */
+res= flowlabel_get(fd,flowlabel,IPV6_FL_S_USER,IPV6_FL_F_CREATE,addr);
+/* Create an process exclusive label */
+res= flowlabel_get(fd,flowlabel,IPV6_FL_S_PROCESS,IPV6_FL_F_CREATE,addr);
+/* Make an label process exclusive */
+res= flowlabel_get(fd,flowlabel,IPV6_FL_S_PROCESS,0,addr);
 ```
 
-## Integrate with your tools
+After an label has been allocated exclusively, make sure the reference has been deleted later,
+so an label can be allocated exclusively later and exclusive locks are later freed.
+The call is defined in the following function.
+```c
+static int flowlabel_put(int fd, uint32_t label)
+{
+	struct in6_flowlabel_req req = {
+		.flr_action = IPV6_FL_A_PUT,
+		.flr_label = htonl(label),
+	};
+	return setsockopt(fd, SOL_IPV6, IPV6_FLOWLABEL_MGR, &req, sizeof(req));
+}
+```
 
-- [ ] [Set up project integrations](https://git.informatik.uni-rostock.de/tr299/how-to-ipv6-flowlabel/-/settings/integrations)
+### Sending a packet with flowlabel
+If you want to send packet with a flowlabel enabled,
+you have to enable the flowlabel in the address struct.
+```c
+#include <string.h>
+struct sockadddr_in6 addr;
+const char * const buffer="Hello World!";
+const char * const addr_s ="3a:3a:3a:3a:3a:3a";
+inet_pton(AF_INET6, addr_s,&(addr.sin6_addr));
+addr.sin6_family=AF_INET6;
+t.sin6_port=55;
+t.sin6_scope_id=0;
+t.sin6_flowinfo=htonl(flowlabel & IPV6_FLOWINFO_FLOWLABEL);
+flowlabel_get(fd,flowlabel,IPV6_FL_S_ANY,IPV6_FL_F_CREATE,&t.sin6_addr);
+sendto(fd,buffer, strlen(buffer), 0, &addr_s,sizeof(addr_s));
+flowlabel_put(fd,flowlabel);
+```
 
-## Collaborate with your team
+## Example
 
-- [ ] [Invite team members and collaborators](https://docs.gitlab.com/ee/user/project/members/)
-- [ ] [Create a new merge request](https://docs.gitlab.com/ee/user/project/merge_requests/creating_merge_requests.html)
-- [ ] [Automatically close issues from merge requests](https://docs.gitlab.com/ee/user/project/issues/managing_issues.html#closing-issues-automatically)
-- [ ] [Enable merge request approvals](https://docs.gitlab.com/ee/user/project/merge_requests/approvals/)
-- [ ] [Automatically merge when pipeline succeeds](https://docs.gitlab.com/ee/user/project/merge_requests/merge_when_pipeline_succeeds.html)
+```c
+/*
+	IPv6 multicast example - ipv6_multicast_send.c
+	2012 - Bjorn Lindgren <nr@c64.org>
+	https://github.com/bjornl/ipv6_multicast_example
+*/
 
-## Test and Deploy
+int
+main(int argc, char *argv[])
+{
+	struct sockaddr_in6 saddr;
+	struct ipv6_mreq mreq;
+	char buf[1400];
+	ssize_t len = 1;
+	int sd,fd,off = 0, on = 1, hops = 255, ifidx = 0;
+	unsigned char random;
+	if (argc < 3) {
+		printf("\nUsage: %s <address> <port>\n\nExample: %s ff02::5:6 12345\n\n", argv[0], argv[0]);
+		return 1;
+	}
+	sd = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
+	if (sd < 0) {
+		perror("socket");
+		return 1;
+	}
+	if (setsockopt(sock, IPPROTO_IPV6, IPV6_FLOWINFO_SEND, &on, sizeof(on)) == -1) {
+        	printf("setsockopt(IPV6_FLOWINFO_SEND): %s\n", strerror(errno));
+        	return 1;
+    	}
+    	if (setsockopt(sock, IPPROTO_IPV6, IPV6_FLOWINFO, &on, sizeof(on)) == -1) {
+    	    printf("setsockopt(IPV6_FLOWINFO): %s\n", strerror(errno));
+    	    return 1;
+    	}
+	if (setsockopt(sd, SOL_IPV6, IPV6_AUTOFLOWLABEL, &off, sizeof(off))) {
+		perror("setsockopt autoflowlabel");
+		return 1;
+	}
+	if (flowlabel_get(sd, 366,    IPV6_FL_S_ANY, IPV6_FL_F_CREATE, &(saddr.sin6_addr)) != 0) {
+		perror("flowlabelget");
+	}
+	memset(&saddr, 0, sizeof(struct sockaddr_in6));
+	saddr.sin6_family = AF_INET6;
+	saddr.sin6_port = htons(atoi(argv[2]));
+	saddr.sin6_flowinfo = htonl(366 & IPV6_FLOWINFO_FLOWLABEL);
+	inet_pton(AF_INET6, argv[1], &saddr.sin6_addr);
+	fd = open("/dev/stdin"  , O_RDONLY, NULL);
+	if (fd < 0) {
+		perror("open");
+		return 1;
+	}
+	while (len) {
+		len = read(fd, buf, 1400);
+		get_flow_labels(sd);
+		/* printf("read %zd bytes from fd\n", len); */
+		if (!len) {
+			break;
+		} else if (len < 0) {
+			perror("read");
+			return 1;
+		} else {
+			len = sendto(sd, buf, len, 0, (const struct sockaddr *) &saddr, sizeof(saddr));
+			/* printf("sent %zd bytes to sd\n", len); */
+			usleep(10000); /* rate limit, 10000 = 135 kilobyte/s */
+		}
+	}
+	if (flowlabel_put(sd, 366)) != 0) { 
+		perror("flowlabelput");
+	}
+	close(sd);
+	close(fd);
+	return 0;
+}
+```
 
-Use the built-in continuous integration in GitLab.
+## Sources
 
-- [ ] [Get started with GitLab CI/CD](https://docs.gitlab.com/ee/ci/quick_start/index.html)
-- [ ] [Analyze your code for known vulnerabilities with Static Application Security Testing(SAST)](https://docs.gitlab.com/ee/user/application_security/sast/)
-- [ ] [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/ee/topics/autodevops/requirements.html)
-- [ ] [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/ee/user/clusters/agent/)
-- [ ] [Set up protected environments](https://docs.gitlab.com/ee/ci/environments/protected_environments.html)
-
-***
-
-# Editing this README
-
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!).  Thank you to [makeareadme.com](https://www.makeareadme.com/) for this template.
-
-## Suggestions for a good README
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
-
-## Name
-Choose a self-explaining name for your project.
-
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
-
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
-
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
-
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
-
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
-
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
-
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
-
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
-
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
-
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
-
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
-
-## License
-For open source projects, say how it is licensed.
-
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+[https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/tools/testing/selftests/net/ipv6_flowlabel.c](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/tools/testing/selftests/net/ipv6_flowlabel.c)
+[https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/tools/testing/selftests/net/ipv6_flowlabel_mgr.c](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/tools/testing/selftests/net/ipv6_flowlabel_mgr.c)
+[https://github.com/bjornl/ipv6_multicast_example](https://github.com/bjornl/ipv6_multicast_example)
