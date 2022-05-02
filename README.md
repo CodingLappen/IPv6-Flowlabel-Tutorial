@@ -3,7 +3,6 @@
 This is a documentation for public use, for setting the ipv6 flowlabel.
 From my experience that is not a straight forward task, you have to do some research and mind many things, that I will describe in this project.
 
-
 ## Getting started
 In this section there are mutliple steps needed to setup the flowlabel sending.
 
@@ -144,6 +143,7 @@ main(int argc, char *argv[])
 	char buf[1400];
 	ssize_t len = 1;
 	int sd,fd,off = 0, on = 1, hops = 255, ifidx = 0;
+	unsigned int flowlabel=666;
 	unsigned char random;
 	if (argc < 3) {
 		printf("\nUsage: %s <address> <port>\n\nExample: %s ff02::5:6 12345\n\n", argv[0], argv[0]);
@@ -166,13 +166,13 @@ main(int argc, char *argv[])
 		perror("setsockopt autoflowlabel");
 		return 1;
 	}
-	if (flowlabel_get(sd, 366,    IPV6_FL_S_ANY, IPV6_FL_F_CREATE, &(saddr.sin6_addr)) != 0) {
+	if (flowlabel_get(sd, flowlabel,  IPV6_FL_S_ANY, IPV6_FL_F_CREATE, &(saddr.sin6_addr)) != 0) {
 		perror("flowlabelget");
 	}
 	memset(&saddr, 0, sizeof(struct sockaddr_in6));
 	saddr.sin6_family = AF_INET6;
 	saddr.sin6_port = htons(atoi(argv[2]));
-	saddr.sin6_flowinfo = htonl(366 & IPV6_FLOWINFO_FLOWLABEL);
+	saddr.sin6_flowinfo = htonl(flowlabel & IPV6_FLOWINFO_FLOWLABEL);
 	inet_pton(AF_INET6, argv[1], &saddr.sin6_addr);
 	fd = open("/dev/stdin"  , O_RDONLY, NULL);
 	if (fd < 0) {
