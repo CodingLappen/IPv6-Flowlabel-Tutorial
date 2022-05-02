@@ -30,7 +30,7 @@ uint32_t on=1;
 uint32_t off=0;
 ```
 ###  Enabling sending the flowlabel per socket. 
-Following syscalls enable the sending and receiving of 
+Following syscalls enable the sending and receiving of flowlabels. 
 ```c
 if(setsockopt(sockfd, IPPROTO_IPV6, IPV6_FLOWINFO_SEND,
                     (const char*)&on, sizeof(on)) < 0) {
@@ -46,7 +46,7 @@ if (setsockopt(sockfd, IPPROTO_IPV6, IPV6_AUTOFLOWLABEL,
     }
 ```
 ## Reserving a flowlabel
-To reserve flowlabels following function was defined as kind of macro:
+To reserve flowlabels following function was defined as kind of a macro:
 ```c
 int flowlabel_get(int fd, uint32_t label, uint8_t share, uint16_t flags, struct in6_addr * addr)
 {
@@ -126,6 +126,59 @@ sendto(fd,buffer, strlen(buffer), 0, &addr_s,sizeof(addr_s));
 flowlabel_put(fd,flowlabel);
 ```
 
+Another method is the set the FLOWINFO within a cmsghdr header struct of the msghdr struct when using sendmsg instead of sendto.
+```
+struct msghdr msg = {0};
+struct cmsghdr *cm;
+/* Allocate the buffer for the flowlabel */
+char control[CMSG_SPACE(sizeof(flowlabel))] = {0};
+cm = (void *)control;
+cm->cmsg_len = CMSG_LEN(sizeof(flowlabel));
+cm->cmsg_level = SOL_IPV6;
+cm->cmsg_type = IPV6_FLOWINFO;
+*(uint32_t *)CMSG_DATA(cm) = htonl(flowlabel);
+
+msg.msg_control = control;
+msg.msg_controllen = sizeof(control);
+```
+### Receiving flowlabels
+Receiving the flowlabel is the reversal to the previous section.
+If you want to extract it with the recvfrom function,  use a
+struct sockaddr\_storage to determine if actually IPv6 was used instead of a normal socket.
+After checking for the address family, you can cast it.
+```c
+// This code is not tested, but should work regardless.
+// sd is the socket descriptor.
+struct sockaddr_storage saddr;
+struct sockaddr_in6 * pointer;
+char buffer[1024];
+size_t length =sizeof(struct sockaddr_storage);
+recvfrom(sd,buffer, sizeof(buffer) ,MSG_WAITALL, &saddr, &length);
+if (saddr.ss_family == AF_INET6){
+	pointer=&addr;
+	printf("Flowinfo: %d",ntohl(pointer->sin6_flowinfo));
+	fflush(stdout);
+}
+```
+When using the recv\_msg function extract the the from the cmsghdr struct.
+```c
+// This code is not tested, but should work regardless.
+// See the first source for actual use.
+struct msghdr msg = {0};
+ret = recvmsg(fd, &msg, 0);
+char control[CMSG_SPACE(sizeof(uint32_t))];
+struct cmsghdr *cm;
+msg.msg_control = control;
+msg.msg_controllen = sizeof(control);
+cm = CMSG_FIRSTHDR(&msg);
+while(cm!=NULL){
+	if (cm->cmsg_level == SOL_IPV6 || cm->cmsg_type == IPV6_FLOWINFO){
+		printf("Flowinfo: %d",ntohl(*(uint32_t*)CMSG_DATA(cm)));
+		fflush(stdout);
+	}
+	cm=CMSG_NXTHDR(&msg,cm);
+}
+```
 ## Example
 
 ```c
